@@ -1,60 +1,86 @@
-# AWSRaid — AWS CloudTrail Investigation
+# AWSRaid — Investigasi AWS CloudTrail
 
-**Portfolio:** Junior SOC Analyst / Blue Team | **Tools:** Splunk, AWS CloudTrail, SPL  
+**Portofolio:** Junior SOC Analyst / Blue Team  
+**Tools:** Splunk, AWS CloudTrail, SPL (Search Processing Language)  
 **Lab:** CyberDefenders AWSRaid CTF
 
-## Summary
-Investigated suspicious AWS authentication and subsequent CloudTrail activity. The captured Splunk results show suspected account `helpdesk.luke`, S3 object retrievals, a bucket public-access-block configuration change, and creation of an IAM user that was added to an administrative group.
+## Ringkasan
 
-## Key findings
+Proyek ini mendokumentasikan investigasi aktivitas mencurigakan pada lingkungan AWS menggunakan log AWS CloudTrail yang dianalisis melalui Splunk. Investigasi berfokus pada aktivitas autentikasi yang mencurigakan, pengambilan objek dari Amazon S3, perubahan konfigurasi keamanan bucket, serta pembuatan akun IAM baru yang ditambahkan ke grup administratif.
 
-| Finding | Result |
+Proyek ini bertujuan untuk melatih kemampuan analisis log, identifikasi indikasi kompromi akun, penelusuran aktivitas penyerang, dan penyusunan laporan insiden keamanan.
+
+## Temuan Utama
+
+| Temuan | Hasil |
 |---|---|
-| Suspected compromised identity | `helpdesk.luke` |
-| First S3 `GetObject` in captured results | `2023-11-02 09:55:53` |
-| Bucket containing a DWG file | `product-designs-repository31183937` |
-| Bucket with `PutBucketPublicAccessBlock` event | `backup-and-restore98825501` |
-| Newly created IAM user | `marketing.mark` |
-| Group membership change | `marketing.mark` added to `Admins` |
+| Akun yang diduga telah dikompromikan | `helpdesk.luke` |
+| Akses S3 `GetObject` pertama pada hasil yang diperiksa | `2023-11-02 09:55:53` |
+| Bucket yang berisi file DWG | `product-designs-repository31183937` |
+| Bucket dengan peristiwa `PutBucketPublicAccessBlock` | `backup-and-restore98825501` |
+| Akun IAM baru yang dibuat | `marketing.mark` |
+| Perubahan keanggotaan grup | `marketing.mark` ditambahkan ke grup `Admins` |
 
-**Caution:** `PutBucketPublicAccessBlock` proves that the setting was modified, not by itself that public access was enabled. Confirm the request parameters, bucket policy, ACLs, and account-level settings. Timestamps are transcribed from screenshots; verify timezone before external correlation.
+**Catatan penting:** Peristiwa `PutBucketPublicAccessBlock` menunjukkan adanya perubahan konfigurasi pemblokiran akses publik. Peristiwa ini saja belum membuktikan bahwa bucket benar-benar menjadi publik. Untuk memastikannya, perlu diperiksa parameter permintaan, kebijakan bucket, ACL, dan konfigurasi tingkat akun. Timestamp di atas disalin dari tangkapan layar Splunk; zona waktu perlu diverifikasi sebelum digunakan untuk korelasi dengan sumber lain.
 
-## Investigation queries
+## Proses Investigasi
 
-### Failed authentication by username
+### 1. Mengidentifikasi kegagalan autentikasi
+
+Kueri berikut digunakan untuk menghitung jumlah kegagalan autentikasi berdasarkan nama pengguna.
+
 ```spl
 index="aws_cloudtrail" eventSource="signin.amazonaws.com" errorMessage="Failed authentication"
 | stats count by userIdentity.userName
 | sort -count
 ```
 
-### Sign-in history
+**Tujuan:** Mengidentifikasi akun dengan jumlah kegagalan autentikasi tertinggi untuk menentukan akun yang perlu diperiksa lebih lanjut.
+
+### 2. Memeriksa riwayat login akun
+
 ```spl
 index="aws_cloudtrail" eventSource="signin.amazonaws.com" "userIdentity.userName"="helpdesk.luke"
 | table _time userIdentity.userName errorMessage responseElements.ConsoleLogin sourceIPAddress
 | sort _time
 ```
 
-### S3 object retrievals
+**Tujuan:** Menelusuri urutan percobaan login, status autentikasi, waktu kejadian, dan alamat IP sumber.
+
+### 3. Menelusuri akses objek S3
+
 ```spl
 index="aws_cloudtrail" "userIdentity.userName"="helpdesk.luke" eventSource="s3.amazonaws.com" eventName="GetObject"
 | table _time eventName requestParameters.bucketName requestParameters.key
 | sort _time
 ```
 
-### DWG file
+**Tujuan:** Mengidentifikasi objek yang diakses, bucket terkait, dan waktu pengambilan objek.
+
+### 4. Mengidentifikasi bucket yang berisi file DWG
+
 ```spl
 index="aws_cloudtrail" "userIdentity.userName"="helpdesk.luke" eventSource="s3.amazonaws.com" eventName="GetObject" "*.dwg"
 | table _time requestParameters.bucketName requestParameters.key
 ```
 
-### Public-access-block change
+**Hasil:** File `Product2_CAD_Designs.dwg` ditemukan pada bucket `product-designs-repository31183937`.
+
+**Tujuan:** Menelusuri akses terhadap file tertentu yang berpotensi memiliki nilai penting bagi organisasi.
+
+### 5. Memeriksa perubahan konfigurasi akses publik S3
+
 ```spl
 index="aws_cloudtrail" "userIdentity.userName"="helpdesk.luke" eventName="PutBucketPublicAccessBlock"
 | table _time requestParameters.bucketName userIdentity.arn
 ```
 
-### IAM user creation
+**Hasil:** Ditemukan peristiwa perubahan konfigurasi pada bucket `backup-and-restore98825501`.
+
+**Tujuan:** Mengidentifikasi perubahan konfigurasi keamanan yang perlu ditinjau untuk menentukan apakah perubahan tersebut meningkatkan risiko paparan data.
+
+### 6. Mengidentifikasi pembuatan akun IAM baru
+
 ```spl
 index="aws_cloudtrail" "userIdentity.userName"="helpdesk.luke" eventCategory="Management"
 | search eventName="CreateUser" OR eventName="CreateLoginProfile"
@@ -62,34 +88,67 @@ index="aws_cloudtrail" "userIdentity.userName"="helpdesk.luke" eventCategory="Ma
 | sort _time
 ```
 
-### Group membership change
+**Hasil:** Akun IAM baru yang teridentifikasi adalah `marketing.mark`.
+
+**Tujuan:** Menemukan kemungkinan upaya mempertahankan akses melalui pembuatan identitas baru.
+
+### 7. Memeriksa penambahan pengguna ke grup
+
 ```spl
 index="aws_cloudtrail" eventName="AddUserToGroup"
 | table _time requestParameters.groupName requestParameters.userName
 ```
 
-## Timeline from screenshots
+**Hasil:** Akun `marketing.mark` ditambahkan ke grup `Admins`.
 
-| Timestamp shown | Observation |
+**Tujuan:** Mengidentifikasi perubahan keanggotaan grup yang dapat meningkatkan hak akses pengguna. Dampak sebenarnya bergantung pada kebijakan IAM yang melekat pada grup tersebut.
+
+## Linimasa Investigasi
+
+Linimasa berikut disusun berdasarkan hasil pencarian yang terlihat pada tangkapan layar Splunk.
+
+| Timestamp yang ditampilkan | Aktivitas |
 |---|---|
-| `2023-11-02 09:55:53` | First displayed S3 `GetObject` |
-| `2023-11-02 09:56:07` | `Product2_CAD_Designs.dwg` retrieved |
-| `2023-11-02 09:58:01` | `PutBucketPublicAccessBlock` on `backup-and-restore98825501` |
-| `2023-11-02 09:59:38` | `marketing.mark` added to `Admins` |
+| `2023-11-02 09:55:53` | Akses `GetObject` pertama pada hasil yang diperiksa |
+| `2023-11-02 09:56:07` | File `Product2_CAD_Designs.dwg` diambil dari bucket `product-designs-repository31183937` |
+| `2023-11-02 09:58:01` | Perubahan konfigurasi `PutBucketPublicAccessBlock` pada bucket `backup-and-restore98825501` |
+| `2023-11-02 09:59:38` | Akun `marketing.mark` ditambahkan ke grup `Admins` |
 
-## Assessment and response recommendations
-- Validate whether the login was authorized; review source IP, MFA, user agent, and session context.
-- Preserve CloudTrail events and surrounding logs.
-- Contain confirmed compromised identities and revoke sessions/credentials as appropriate.
-- Audit `marketing.mark`, its access keys, policies, and group memberships.
-- Review the full S3 configuration event, bucket policies, ACLs, and access logs to confirm exposure and impact.
-- Investigate accessed objects for sensitivity and possible data exfiltration.
+**Catatan:** Linimasa ini mencerminkan hasil yang diperiksa, bukan keseluruhan aktivitas dalam lingkungan AWS. Zona waktu dan urutan lengkap peristiwa perlu diverifikasi melalui log asli.
 
-## Skills demonstrated
-Splunk SPL, CloudTrail analysis, authentication triage, S3 access investigation, IAM persistence and privilege-change analysis, timeline building, incident reporting.
+## Analisis dan Rekomendasi Respons
 
-## Evidence
-Screenshots of the Splunk results are in [`evidence/`](evidence/).
+Berdasarkan temuan dalam simulasi ini, beberapa tindakan yang dapat dilakukan oleh tim SOC adalah:
+
+- Memverifikasi apakah aktivitas login berasal dari pengguna yang sah dengan memeriksa alamat IP sumber, status MFA, user agent, dan konteks sesi.
+- Mengamankan serta mempertahankan log CloudTrail dan bukti pendukung untuk kebutuhan investigasi.
+- Menonaktifkan atau merotasi kredensial identitas yang terbukti dikompromikan serta mencabut sesi aktif jika diperlukan.
+- Memeriksa akun `marketing.mark`, termasuk access key, kebijakan IAM, dan keanggotaan grupnya.
+- Meninjau perubahan konfigurasi S3, kebijakan bucket, ACL, serta pengaturan akses publik untuk memastikan dampak perubahan.
+- Memeriksa sensitivitas objek yang diakses dan mencari bukti kemungkinan pengambilan atau eksfiltrasi data.
+- Mendokumentasikan proses penanganan, pemulihan, dan rekomendasi pencegahan agar insiden serupa dapat dideteksi lebih awal.
+
+## Keterampilan yang Dipraktikkan
+
+- Analisis log menggunakan Splunk SPL.
+- Investigasi AWS CloudTrail.
+- Analisis anomali autentikasi.
+- Penelusuran akses objek Amazon S3.
+- Investigasi perubahan konfigurasi keamanan cloud.
+- Analisis pembuatan akun IAM dan perubahan hak akses.
+- Penyusunan linimasa insiden.
+- Dokumentasi temuan dan rekomendasi respons insiden.
+
+## Bukti Investigasi
+
+Tangkapan layar hasil pencarian Splunk disimpan di folder [`evidence/`](evidence/). Bukti tersebut mencakup:
+
+- Riwayat autentikasi akun yang diperiksa.
+- Aktivitas pengambilan objek S3.
+- File DWG beserta bucket terkait.
+- Perubahan konfigurasi pemblokiran akses publik S3.
+- Penambahan akun baru ke grup `Admins`.
 
 ## Disclaimer
-This is a learning exercise based on a deliberately constructed CTF dataset, not evidence of activity in a real AWS account. Do not publish raw datasets, credentials, or session tokens.
+
+Proyek ini merupakan latihan analisis keamanan berbasis dataset CTF yang sengaja dibuat untuk pembelajaran. Temuan di dalamnya bukan bukti aktivitas pada akun AWS nyata. Jangan mengunggah dataset mentah, kredensial, token sesi, atau informasi sensitif ke repository publik.

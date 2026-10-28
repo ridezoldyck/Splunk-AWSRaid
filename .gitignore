@@ -1,0 +1,5 @@
+# Do not commit raw datasets or secrets
+*.pcap
+.env
+secrets*
+credentials*
